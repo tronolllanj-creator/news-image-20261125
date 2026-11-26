@@ -1,522 +1,670 @@
-import os
 import sys
-
+import os
 from PIL import Image, ImageDraw, ImageFont
 
-# ----- required local fonts ---------------------------------------------
-BOLD_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-REG_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
-
-# a tiny helper that never fails on size (deterministic local files)
-_font_cache = {}
-
-
-def _font(path, size):
-    key = (path, size)
-    if key not in _font_cache:
-        _font_cache[key] = ImageFont.truetype(path, size)
-    return _font_cache[key]
-
-
-def load_bold(size):
-    return _font(BOLD_PATH, size)
-
-
-def load_reg(size):
-    return _font(REG_PATH, size)
-
-
-# ----- palette ------------------------------------------------------------
-PAPER = (244, 239, 230)
-INK = (26, 26, 26)
-RED = (200, 16, 46)
-BLUE = (43, 76, 126)
-GREY = (138, 129, 120)
+# ─── Constants ───
+W, H = 1024, 1024
+BG = (0xF7, 0xF1, 0xE3)          # paper
+INK = (0x14, 0x21, 0x3D)         # ink
+RED = (0xC1, 0x27, 0x2D)         # accent red
+NAVY = (0x1B, 0x2A, 0x4A)        # navy
+TEAL = (0x0E, 0x7C, 0x7B)        # teal
+GOLD = (0xD9, 0xA4, 0x41)        # gold
 WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
 
-SIZE = 1024
+# ─── Font loading ───
+FONT_DIR = "/usr/share/fonts/truetype/dejavu/"
+FONT_BOLD = os.path.join(FONT_DIR, "DejaVuSans-Bold.ttf")
+FONT_REG = os.path.join(FONT_DIR, "DejaVuSans.ttf")
 
+def load_fonts():
+    return {
+        "masthead": ImageFont.truetype(FONT_BOLD, 36),
+        "date": ImageFont.truetype(FONT_BOLD, 20),
+        "lead_headline": ImageFont.truetype(FONT_BOLD, 28),
+        "lead_summary": ImageFont.truetype(FONT_REG, 18),
+        "chip": ImageFont.truetype(FONT_BOLD, 11),
+        "story_headline": ImageFont.truetype(FONT_BOLD, 16),
+        "story_body": ImageFont.truetype(FONT_REG, 13),
+        "ticker": ImageFont.truetype(FONT_REG, 14),
+        "footer": ImageFont.truetype(FONT_REG, 12),
+        "icon_label": ImageFont.truetype(FONT_BOLD, 10),
+    }
 
-# ----- text helpers -------------------------------------------------------
+FONTS = load_fonts()
+
+# ─── Text helpers ───
 def wrap_text(draw, text, font, max_width):
-    if max_width is None or max_width <= 0:
-        return [line for line in text.split("\n") if line.strip()] or [""]
+    """Return list of lines wrapped to max_width."""
+    words = text.split()
     lines = []
-    for para in text.split("\n"):
-        para = para.strip()
-        if not para:
-            lines.append("")
-            continue
-        words = para.split(" ")
-        cur = ""
-        for w in words:
-            trial = (cur + " " + w).strip()
-            if draw.textlength(trial, font=font) <= max_width or cur == "":
-                cur = trial
-            else:
-                lines.append(cur)
-                cur = w
-        lines.append(cur)
-    return lines if lines else [""]
+    cur = []
+    for w in words:
+        test = " ".join(cur + [w])
+        if draw.textlength(test, font=font) <= max_width:
+            cur.append(w)
+        else:
+            if cur:
+                lines.append(" ".join(cur))
+            cur = [w]
+    if cur:
+        lines.append(" ".join(cur))
+    return lines
 
-
-def draw_wrapped(draw, xy, lines, font, fill, leading=1):
-    x, y = xy[0], xy[1]
+def draw_wrapped(draw, xy, lines, font, fill, leading=1.2):
+    """Draw wrapped lines at xy, return (width, height) used."""
+    x, y = xy
+    line_h = int(font.size * leading)
+    max_w = 0
     for line in lines:
-        draw.text((x, y), line, font=font, fill=fill)
-        bbox = font.getbbox(line)
-        h = bbox[3] - bbox[1] if bbox else int(font.size)
-        y = y + h * int(leading) + int(font.size * 0.18)
-    return y
+        draw.text((int(x), int(y)), line, font=font, fill=fill)
+        w = draw.textlength(line, font=font)
+        if w > max_w:
+            max_w = w
+        y += line_h
+    return int(max_w), int(y - xy[1])
 
+# ─── Geometric icon helpers ───
+def draw_chip(draw, xy, text, font, bg_color, padding=6, radius=4):
+    """Draw a rounded-rect chip with white bold label."""
+    x, y = xy
+    tw = draw.textlength(text, font=font)
+    th = font.size
+    w = int(tw + 2 * padding)
+    h = int(th + 2 * padding)
+    # rounded rect via pieslices + rect
+    r = radius
+    draw.rounded_rectangle([int(x), int(y), int(x + w), int(y + h)], radius=r, fill=bg_color)
+    draw.text((int(x + padding), int(y + padding)), text, font=font, fill=WHITE)
+    return w, h
 
-# ----- tiny geometric pictogram helper ------------------------------------
-def draw_icon(draw, cx, cy, kind, color, s=28):
-    s = int(s)
-    cx = int(cx)
-    cy = int(cy)
-    hw = s // 2
-    if kind == "tower":
-        # two stacked blocks offset to suggest a high-rise
-        top = (cx - hw // 2, cy - hw, cx + hw // 2, cy + hw // 3)
-        bot = (cx - hw // 3, cy - hw // 3, cx + hw, cy + hw)
-        draw.rectangle(top, fill=color)
-        draw.rectangle(bot, fill=color)
-        draw.line((cx + hw // 2, cy - hw // 2, cx + hw, cy - hw // 2), fill=color, width=2)
-    elif kind == "gauge":
-        # barrel + dial
-        draw.ellipse((cx - hw, cy - 6, cx - 6, cy + 6), fill=color)
-        draw.rectangle((cx - 6, cy - hw // 2, cx + hw, cy + hw // 2), fill=color)
-        draw.line((cx + hw // 2, cy + hw // 4, cx + hw - 2, cy - hw // 2), fill=PAPER, width=2)
-    elif kind == "plane":
-        p1 = (cx - hw, cy)
-        p2 = (cx + hw, cy)
-        p3 = (cx, cy - hw // 2)
-        draw.polygon((p1, p2, p3), fill=color)
-        draw.line((cx - hw // 2, cy, cx + hw // 2, cy), fill=color, width=2)
-    elif kind == "broken":
-        # two bricks not touching, a gap + diagonal slash = link broken
-        draw.rectangle((cx - hw, cy - hw // 3, cx - 2, cy + hw // 3), fill=color)
-        draw.rectangle((cx + 2, cy - hw // 3, cx + hw, cy + hw // 3), fill=color)
-        draw.line((cx - hw, cy + hw, cx + hw, cy - hw), fill=color, width=2)
-    elif kind == "bats":
-        draw.ellipse((cx - hw, cy - hw, cx - 2, cy + hw), fill=color)
-        draw.line((cx - 4, cy, cx + hw, cy), fill=color, width=3)
-    elif kind == "bolt":
-        pts = [(cx + hw // 3, cy - hw), (cx - hw // 2, cy + 2), (cx, cy + 2),
-               (cx - hw // 3, cy + hw), (cx + hw // 2, cy - 2), (cx, cy - 2)]
+def draw_icon_fire(draw, cx, cy, size, fill):
+    """Small flame icon."""
+    s = size // 2
+    pts = [
+        (cx, cy - s),
+        (cx - s//2, cy),
+        (cx - s//3, cy),
+        (cx, cy + s),
+        (cx + s//3, cy),
+        (cx + s//2, cy),
+    ]
+    draw.polygon(pts, fill=fill)
+    # inner flame
+    pts2 = [(cx, cy - s//2), (cx - s//4, cy), (cx, cy + s//2), (cx + s//4, cy)]
+    draw.polygon(pts2, fill=(255, 200, 50))
+
+def draw_icon_lightning(draw, cx, cy, size, fill):
+    """Lightning bolt for energy/power."""
+    s = size // 2
+    pts = [
+        (cx, cy - s),
+        (cx + s//3, cy - s//4),
+        (cx - s//6, cy - s//4),
+        (cx, cy + s//2),
+        (cx - s//3, cy + s//4),
+        (cx + s//6, cy + s//4),
+    ]
+    draw.polygon(pts, fill=fill)
+
+def draw_icon_drone(draw, cx, cy, size, fill):
+    """Simple drone shape."""
+    s = size // 2
+    # body
+    draw.ellipse([cx - s//3, cy - s//4, cx + s//3, cy + s//4], fill=fill)
+    # four arms
+    for dx, dy in [(-s, 0), (s, 0), (0, -s), (0, s)]:
+        draw.rectangle([cx + dx - s//6, cy + dy - s//6, cx + dx + s//6, cy + dy + s//6], fill=fill)
+
+def draw_icon_oil(draw, cx, cy, size, fill):
+    """Oil drum / barrel."""
+    s = size // 2
+    draw.rectangle([cx - s//2, cy - s, cx + s//2, cy + s], fill=fill, outline=INK, width=1)
+    draw.line([cx - s//2, cy - s//2, cx + s//2, cy - s//2], fill=INK, width=1)
+    draw.line([cx - s//2, cy + s//2, cx + s//2, cy + s//2], fill=INK, width=1)
+
+def draw_icon_tariff(draw, cx, cy, size, fill):
+    """Up/down arrows for trade."""
+    s = size // 2
+    # up arrow
+    draw.polygon([(cx - s//2, cy), (cx, cy - s), (cx + s//2, cy)], fill=fill)
+    # down arrow
+    draw.polygon([(cx - s//2, cy + 2), (cx, cy + s + 2), (cx + s//2, cy + 2)], fill=fill)
+
+def draw_icon_rocket(draw, cx, cy, size, fill):
+    """Rocket for space."""
+    s = size // 2
+    # body
+    draw.rectangle([cx - s//4, cy - s, cx + s//4, cy + s//2], fill=fill)
+    # nose
+    draw.polygon([(cx - s//3, cy - s), (cx, cy - s - s//2), (cx + s//3, cy - s)], fill=fill)
+    # fins
+    draw.polygon([(cx - s//4, cy + s//2), (cx - s, cy + s), (cx - s//4, cy + s)], fill=fill)
+    draw.polygon([(cx + s//4, cy + s//2), (cx + s, cy + s), (cx + s//4, cy + s)], fill=fill)
+    # flame
+    draw.polygon([(cx - s//6, cy + s//2), (cx, cy + s), (cx + s//6, cy + s//2)], fill=RED)
+
+def draw_icon_nato(draw, cx, cy, size, fill):
+    """Compass rose for NATO."""
+    s = size // 2
+    draw.ellipse([cx - s, cy - s, cx + s, cy + s], outline=fill, width=2)
+    draw.line([cx, cy - s, cx, cy + s], fill=fill, width=2)
+    draw.line([cx - s, cy, cx + s, cy], fill=fill, width=2)
+    draw.line([cx - s, cy - s, cx + s, cy + s], fill=fill, width=1)
+    draw.line([cx - s, cy + s, cx + s, cy - s], fill=fill, width=1)
+
+def draw_icon_mine(draw, cx, cy, size, fill):
+    """Mine shaft / pickaxe."""
+    s = size // 2
+    # shaft
+    draw.rectangle([cx - s//3, cy - s, cx + s//3, cy + s], fill=fill)
+    # pickaxe
+    draw.line([cx - s, cy - s//2, cx + s, cy + s//2], fill=fill, width=2)
+    draw.polygon([(cx + s, cy + s//2), (cx + s//2, cy), (cx + s//2, cy + s//2)], fill=fill)
+
+def draw_icon_flag(draw, cx, cy, size, fill):
+    """Flag for politics/diplomacy."""
+    s = size // 2
+    draw.line([cx, cy - s, cx, cy + s], fill=INK, width=2)
+    draw.polygon([(cx, cy - s), (cx + s, cy - s//2), (cx, cy)], fill=fill)
+
+def draw_icon_chip(draw, cx, cy, size, fill):
+    """Microchip for markets/tech."""
+    s = size // 2
+    draw.rectangle([cx - s, cy - s, cx + s, cy + s], fill=fill, outline=INK, width=1)
+    # pins
+    for i in range(-1, 2):
+        draw.line([cx - s, cy + i * s//2, cx - s - 3, cy + i * s//2], fill=INK, width=1)
+        draw.line([cx + s, cy + i * s//2, cx + s + 3, cy + i * s//2], fill=INK, width=1)
+
+def draw_icon_flood(draw, cx, cy, size, fill):
+    """Water wave for floods."""
+    s = size // 2
+    draw.arc([cx - s, cy - s//2, cx + s, cy + s//2], 0, 180, fill=fill, width=3)
+    draw.arc([cx - s//2, cy, cx + s//2, cy + s], 0, 180, fill=fill, width=2)
+
+def draw_icon_handshake(draw, cx, cy, size, fill):
+    """Handshake for alliances."""
+    s = size // 2
+    # two hands
+    draw.ellipse([cx - s, cy - s//3, cx - s//3, cy + s//3], fill=fill)
+    draw.ellipse([cx + s//3, cy - s//3, cx + s, cy + s//3], fill=fill)
+    # wrists
+    draw.rectangle([cx - s, cy + s//3, cx - s//3, cy + s], fill=fill)
+    draw.rectangle([cx + s//3, cy + s//3, cx + s, cy + s], fill=fill)
+
+def draw_icon_cop(draw, cx, cy, size, fill):
+    """Globe for climate/COP."""
+    s = size // 2
+    draw.ellipse([cx - s, cy - s, cx + s, cy + s], outline=fill, width=2)
+    draw.line([cx, cy - s, cx, cy + s], fill=fill, width=2)
+    draw.arc([cx - s, cy - s, cx + s, cy + s], 30, 150, fill=fill, width=2)
+    draw.arc([cx - s, cy - s, cx + s, cy + s], 210, 330, fill=fill, width=2)
+
+def draw_icon_sport(draw, cx, cy, size, fill):
+    """Cricket bat + ball."""
+    s = size // 2
+    draw.line([cx - s//2, cy + s, cx + s//2, cy - s], fill=INK, width=3)
+    draw.ellipse([cx + s//2 - 4, cy - s - 4, cx + s//2 + 4, cy - s + 4], fill=RED)
+
+ICON_FUNCS = {
+    "fire": draw_icon_fire,
+    "lightning": draw_icon_lightning,
+    "drone": draw_icon_drone,
+    "oil": draw_icon_oil,
+    "tariff": draw_icon_tariff,
+    "rocket": draw_icon_rocket,
+    "nato": draw_icon_nato,
+    "mine": draw_icon_mine,
+    "flag": draw_icon_flag,
+    "chip": draw_icon_chip,
+    "flood": draw_icon_flood,
+    "handshake": draw_icon_handshake,
+    "cop": draw_icon_cop,
+    "sport": draw_icon_sport,
+}
+
+def draw_story_icon(draw, cx, cy, size, icon_name, fill):
+    fn = ICON_FUNCS.get(icon_name, draw_icon_fire)
+    fn(draw, cx, cy, size, fill)
+
+# ─── Lead story large scene (Cairo tanker fire) ───
+def draw_cairo_scene(draw, x, y, w, h):
+    """Draw large isometric scene: overturned tanker, flames, road, charred vehicles."""
+    # Road surface (dark asphalt)
+    road_y = y + int(h * 0.65)
+    road_h = int(h * 0.35)
+    draw.rectangle([int(x), int(road_y), int(x + w), int(road_y + road_h)], fill=(30, 30, 30))
+    # Road markings
+    for i in range(0, w, 60):
+        draw.rectangle([int(x + i), int(road_y + road_h//2 - 4), int(x + i + 30), int(road_y + road_h//2 + 4)], fill=(200, 200, 200))
+    
+    # Cairo skyline silhouette in background
+    sky_h = road_y - y
+    for i in range(12):
+        bx = x + i * (w // 12)
+        bw = w // 12
+        bh = int(sky_h * (0.3 + (i % 3) * 0.2))
+        draw.rectangle([int(bx + 5), int(road_y - bh), int(bx + bw - 5), int(road_y)], fill=(60, 50, 45))
+        # windows
+        for wx in range(int(bx + 10), int(bx + bw - 10), 15):
+            for wy in range(int(road_y - bh + 5), int(road_y - 5), 12):
+                if (wx + wy) % 3 == 0:
+                    draw.rectangle([wx, wy, wx + 3, wy + 3], fill=(120, 100, 80))
+    
+    # Overturned tanker (large cylinder on side)
+    tx = x + int(w * 0.35)
+    ty = road_y - int(h * 0.25)
+    tr = int(h * 0.18)
+    tl = int(w * 0.35)
+    # Tanker body
+    draw.ellipse([int(tx - tr), int(ty - tr), int(tx + tr), int(ty + tr)], fill=(40, 35, 35), outline=(80, 70, 60), width=2)
+    draw.rectangle([int(tx - tr), int(ty - tr), int(tx - tr + tl), int(ty + tr)], fill=(40, 35, 35), outline=(80, 70, 60), width=2)
+    draw.ellipse([int(tx - tr + tl), int(ty - tr), int(tx + tr + tl), int(ty + tr)], fill=(40, 35, 35), outline=(80, 70, 60), width=2)
+    # Hazard markings
+    for i in range(5):
+        draw.rectangle([int(tx - tr + 5 + i * 15), int(ty - tr + 5), int(tx - tr + 15 + i * 15), int(ty + tr - 5)], fill=(255, 255, 0) if i % 2 == 0 else (30, 30, 30))
+    
+    # FLAMES rising from tanker
+    flame_base_y = ty
+    for layer in range(4):
+        alpha = 1.0 - layer * 0.2
+        fh = int(h * (0.25 - layer * 0.05))
+        fw = int(tr * (1.5 - layer * 0.2))
+        fx = tx + tl // 2
+        # Main flame body
+        pts = [
+            (fx, flame_base_y),
+            (fx - fw, flame_base_y - fh // 3),
+            (fx - fw // 2, flame_base_y - fh // 2),
+            (fx, flame_base_y - fh),
+            (fx + fw // 2, flame_base_y - fh // 2),
+            (fx + fw, flame_base_y - fh // 3),
+        ]
+        color = (int(255 * alpha), int(120 * alpha), int(20 * alpha))
         draw.polygon(pts, fill=color)
-    else:
-        draw.ellipse((cx - hw // 2, cy - hw // 2, cx + hw // 2, cy + hw // 2), fill=color)
-
-
-def chip(draw, left, top, text, ffont, color, pad_x=12, pad_y=6):
-    w = int(draw.textlength(text, font=ffont))
-    bb = ffont.getbbox(text)
-    h = bb[3] - bb[1]
-    left = int(left)
-    top = int(top)
-    draw.rounded_rectangle([left, top, left + w + 2 * pad_x, top + h + 2 * pad_y],
-                           radius=6, fill=color)
-    draw.text((left + pad_x, top + pad_y), text, font=ffont, fill=WHITE)
-    return left + w + 2 * pad_x
-
-
-# ----- variant 1 : FRONT PAGE --------------------------------------------
-def draw_variant1():
-    img = Image.new("RGB", (SIZE, SIZE), PAPER)
-    d = ImageDraw.Draw(img)
-
-    f_mast = load_bold(46)
-    f_date = load_bold(26)
-    f_lead = load_bold(52)
-    f_dek = load_reg(24)
-    f_blk = load_bold(22)
-    f_sm = load_reg(17)
-    f_stat = load_bold(30)
-    f_chip = load_bold(15)
-    f_tick = load_bold(15)
-
-    M = 34
-    right = SIZE - M
-
-    # masthead
-    d.rectangle([M, M, right, M + 58], fill=INK)
-    d.text((M + 18, M + 7), "THE DAILY SIGNAL", font=f_mast, fill=PAPER)
-    d.text((right - 18, M + 56 - 30), "WEDNESDAY 25 NOVEMBER 2026",
-           font=f_date, fill=RED)
-    d.line([M, M + 60, right, M + 60], fill=RED, width=4)
-
-    top = M + 76
-
-    # LEAD story (story 1, GULF) full width
-    lead_head = "DRONE HITS RIYADH'S TALLEST TOWER; COALITION VOWS BLOWBACK"
-    lead_sum = ("Houthi strike on the PIF Tower in the King Abdullah Financial "
-                "District wounds 11 people. It is the second strike on the tower "
-                "in under a week; the US urges heightened vigilance.")
-    d.text((M, top), "GULF", font=f_blk, fill=RED)
-    hh = top + 32
-    for ln in wrap_text(d, lead_head, f_lead, right - M - 70):
-        d.text((M, hh), ln, font=f_lead, fill=INK)
-        bb = f_lead.getbbox(ln)
-        hh += (bb[3] - bb[1]) + 8
-    hh += 6
-    chips = [("11 WOUNDED", RED), ("2ND STRIKE IN 7 DAYS", BLUE)]
-    cx = M
-    for txt, col in chips:
-        cx = chip(d, cx, hh, txt, f_chip, col) + 12
-    hh += 42
-    for ln in wrap_text(d, lead_sum, f_dek, right - M):
-        d.text((M, hh), ln, font=f_dek, fill=INK)
-        bb = f_dek.getbbox(ln)
-        hh += (bb[3] - bb[1]) + 6
-    lead_bottom = hh + 8
-    d.line([M, lead_bottom - 2, right, lead_bottom - 2], fill=GREY, width=1)
-
-    # STRONG SECONDARY (story 2, ENERGY) full width with gauge
-    top = lead_bottom + 10
-    d.text((M, top), "ENERGY", font=f_blk, fill=INK)
-    d.line([M, top + 28, M + 90, top + 28], fill=RED, width=3)
-    gy = top + 44
-    gx = right - 60
-    draw_icon(d, gx, gy + 18, "gauge", RED, s=44)
-    gtxt = ("Iran: more tankers mined and ablaze in the Strait of Hormuz. "
-            "The strait is near-paralysed. Oil rebounds from three-month lows "
-            "and the rial dips to a record 2.83M per dollar.")
-    ok = True
-    for ln in wrap_text(d, gtxt, f_dek, right - M - 90):
-        d.text((M, gy + 18), ln, font=f_dek, fill=INK)
-        bb = f_dek.getbbox(ln)
-        gy += (bb[3] - bb[1]) + 6
-    # stat chips
-    stat_y = gy + 6
-    sx = M
-    for txt, col in [("-40% OIL TRAFFIC", RED), ("400 SHIPS HELD", BLUE),
-                     ("RIAL 2.83M/$", RED)]:
-        sx = chip(d, sx, stat_y, txt, f_stat, col) + 16
-    sec_bottom = stat_y + 54
-    d.line([M, sec_bottom, right, sec_bottom], fill=GREY, width=1)
-
-    # THREE-COLUMN news band : politics(2.3), india(2.4), climate(2.5)
-    col_top = sec_bottom + 12
-    col_gap = 18
-    colw = (right - M - 2 * col_gap) // 3
-    cols = [
-        ("POLITICS", "plane", BLUE,
-         "NATO to fly early-warning jets over Poland; Russia, Ukraine trade "
-         "accusations over Black Sea strikes."),
-        ("INDIA", "tower", BLUE,
-         "BJP and SAD re-bond for 2027 Punjab vote; Nepal PM closes first "
-         "state visit to India."),
-        ("CLIMATE", "broken", RED,
-         "COP31 ends a no-deal in Antalya; Thailand banks 800M baht; Tuvalu "
-         "plans 2027 fossil-fuel exit summit."),
+        # Inner flame
+        pts2 = [
+            (fx, flame_base_y - 5),
+            (fx - fw // 3, flame_base_y - fh // 3),
+            (fx, flame_base_y - int(fh * 0.7)),
+            (fx + fw // 3, flame_base_y - fh // 3),
+        ]
+        color2 = (255, int(200 * alpha), int(50 * alpha))
+        draw.polygon(pts2, fill=color2)
+    
+    # Smoke plume
+    for i in range(6):
+        sx = tx + tl // 2 + int((i - 2) * 12)
+        sy = ty - int(h * 0.15) - i * 8
+        sr = int(12 + i * 4)
+        draw.ellipse([sx - sr, sy - sr//2, sx + sr, sy + sr//2], fill=(50, 50, 50, 180), outline=None)
+    
+    # Charred vehicles scattered on road
+    vehicle_positions = [
+        (x + int(w * 0.08), road_y + 10),
+        (x + int(w * 0.22), road_y + 15),
+        (x + int(w * 0.55), road_y + 5),
+        (x + int(w * 0.7), road_y + 20),
+        (x + int(w * 0.85), road_y + 10),
+        (x + int(w * 0.92), road_y + 15),
     ]
-    for i, (blk, ico, ccol, body) in enumerate(cols):
-        x0 = M + i * (colw + col_gap)
-        x1 = x0 + colw
-        d.text((x0, col_top), blk, font=f_blk, fill=ccol)
-        ico_y = col_top + 40
-        draw_icon(d, x0 + 18, ico_y, ico, ccol, s=34)
-        bx = x0 + 56
-        # headline shortened to fit width
-        title = wrap_text(d, (body.split(".")[0] + "."), f_dek, x1 - bx)
-        ty = ico_y
-        for ln in title:
-            d.text((bx, ty), ln, font=f_dek, fill=INK)
-            bb = f_dek.getbbox(ln)
-            ty += (bb[3] - bb[1]) + 5
-        ty += 4
-        for ln in wrap_text(d, "", f_sm, x1 - x0):
-            pass
-        # body text
-        by = ty
-        full = body
-        for ln in wrap_text(d, full, f_sm, x1 - x0):
-            d.text((x0, by), ln, font=f_sm, fill=INK)
-            bb = f_sm.getbbox(ln)
-            by += (bb[3] - bb[1]) + 4
-        d.line([x0, col_top + 8, x0, by], fill=GREY, width=2)
-    band_bottom = col_top + 150
+    for vx, vy in vehicle_positions:
+        # Car body (charred)
+        draw.rectangle([int(vx), int(vy), int(vx + 40), int(vy + 18)], fill=(25, 20, 20), outline=(60, 50, 50), width=1)
+        # Roof
+        draw.rectangle([int(vx + 5), int(vy - 8), int(vx + 35), int(vy)], fill=(30, 25, 25), outline=(60, 50, 50), width=1)
+        # Wheels
+        draw.ellipse([int(vx + 5), int(vy + 15), int(vx + 15), int(vy + 25)], fill=(15, 15, 15))
+        draw.ellipse([int(vx + 25), int(vy + 15), int(vx + 35), int(vy + 25)], fill=(15, 15, 15))
+        # Fire on some
+        if (vx + vy) % 3 == 0:
+            draw.polygon([(vx + 15, vy), (vx + 10, vy - 15), (vx + 20, vy - 10), (vx + 30, vy - 15), (vx + 25, vy)], fill=(255, 100, 20))
+    
+    # Emergency lights (blue/red) on sides
+    for ex in [x + 30, x + w - 30]:
+        for ey in range(int(road_y), int(road_y + road_h), 30):
+            draw.ellipse([ex - 8, ey - 8, ex + 8, ey + 8], fill=RED if (ey // 30) % 2 == 0 else (0, 100, 255))
+    
+    # Silhouettes for casualties (31 dead, 21 injured) - small figures along roadside
+    for i in range(31):
+        fx = x + 40 + (i % 10) * 45
+        fy = road_y - 40 - (i // 10) * 25
+        draw.line([fx, fy, fx, fy + 12], fill=(100, 80, 70), width=2)
+        draw.line([fx - 4, fy + 3, fx + 4, fy + 3], fill=(100, 80, 70), width=1)
+        draw.line([fx, fy + 12, fx - 4, fy + 20], fill=(100, 80, 70), width=1)
+        draw.line([fx, fy + 12, fx + 4, fy + 20], fill=(100, 80, 70), width=1)
+    for i in range(21):
+        fx = x + 40 + (i % 7) * 45
+        fy = road_y - 120 - (i // 7) * 20
+        draw.line([fx, fy, fx, fy + 10], fill=(150, 120, 100), width=2)
+        draw.line([fx - 3, fy + 2, fx + 3, fy + 2], fill=(150, 120, 100), width=1)
+        draw.line([fx, fy + 10, fx - 3, fy + 17], fill=(150, 120, 100), width=1)
+        draw.line([fx, fy + 10, fx + 3, fy + 17], fill=(150, 120, 100), width=1)
 
-    # SPORT strip (2.6) full width
-    sp_top = band_bottom + 16
-    d.rectangle([M, sp_top, right, sp_top + 56], fill=BLUE)
-    draw_icon(d, M + 26, sp_top + 28, "bats", PAPER, s=34)
-    d.text((M + 60, sp_top + 14),
-           "SPORT  |  England down Australia by 8 wickets to level the T20s.",
-           font=f_blk, fill=PAPER)
-    d.text((right - 18 - int(d.textlength(
-        "Women's hockey: India face China, Asian Champions Trophy", font=f_blk)),
-           sp_top + 14),
-           "Women's hockey: India face China, Asian Champions Trophy",
-           font=f_blk, fill=PAPER)
-    sport_bottom = sp_top + 56
-
-    # TICKER strip (story 6 / extras)
-    tk_top = sport_bottom + 14
-    d.rectangle([M, tk_top, right, tk_top + 54], fill=INK)
-    d.text((M + 14, tk_top + 15), "TICKER", font=f_blk, fill=RED)
-    d.line([M + 92, tk_top + 13, M + 92, tk_top + 41], fill=RED, width=2)
-    tick_items = [
-        "Thanksgiving: 81.5M travellers, 417K flights (AAA/FAA)",
-        "Ukraine says it struck a Russian ship, Gulf of Finland",
-        "Sarkozy corruption case to trial (France)",
-        "Gaza death toll: 74,746",
+def draw_variant1(img, draw):
+    """DENSE FRONT PAGE layout."""
+    # ─── Background ───
+    draw.rectangle([0, 0, W, H], fill=BG)
+    
+    # ─── Navy masthead band ───
+    mast_h = 90
+    draw.rectangle([0, 0, W, mast_h], fill=NAVY)
+    draw.text((int(W * 0.04), 12), "THE WORLD IN ONE IMAGE", font=FONTS["masthead"], fill=WHITE)
+    draw.text((int(W * 0.04), 52), "WEDNESDAY 25 NOVEMBER 2026", font=FONTS["date"], fill=GOLD)
+    
+    # ─── Lead story area ───
+    lead_y = mast_h + 10
+    lead_h = 300
+    lead_x = 20
+    lead_w = W - 40
+    
+    # Lead background panel
+    draw.rounded_rectangle([lead_x, lead_y, lead_x + lead_w, lead_y + lead_h], radius=8, fill=(255, 252, 245), outline=NAVY, width=2)
+    
+    # Large Cairo scene on right half
+    scene_x = lead_x + int(lead_w * 0.52)
+    scene_w = lead_w - (scene_x - lead_x) - 15
+    scene_h = lead_h - 20
+    draw.rectangle([scene_x, lead_y + 10, scene_x + scene_w, lead_y + 10 + scene_h], fill=(255, 252, 245))
+    draw.polygon([(scene_x, lead_y + 10), (scene_x + scene_w, lead_y + 10), (scene_x + scene_w, lead_y + 10 + scene_h), (scene_x, lead_y + 10 + scene_h)], fill=(255, 252, 245))
+    draw_cairo_scene(draw, scene_x, lead_y + 10, scene_w, scene_h)
+    draw.rectangle([lead_x, lead_y, lead_x + lead_w, lead_y + lead_h], outline=NAVY, width=2)
+    
+    # Lead text on left half
+    text_x = lead_x + 20
+    text_w = int(lead_w * 0.48) - 30
+    text_y = lead_y + 20
+    
+    # Category chip
+    draw_chip(draw, (text_x, text_y), "CAIRO", FONTS["chip"], RED)
+    
+    # Headline
+    hl_y = text_y + 28
+    headline = "Fuel tanker overturns and burns on Ring Road — 31 dead, 21 hurt"
+    lines = wrap_text(draw, headline, FONTS["lead_headline"], text_w)
+    draw_wrapped(draw, (text_x, hl_y), lines[:2], FONTS["lead_headline"], INK)
+    
+    # Summary (2 lines)
+    sum_y = hl_y + 60
+    summary = "Al-Warraq, Giza: tanker catches fire Wednesday evening; more than two dozen vehicles charred. Deadliest road blaze in years."
+    lines = wrap_text(draw, summary, FONTS["lead_summary"], text_w)
+    draw_wrapped(draw, (text_x, sum_y), lines[:2], FONTS["lead_summary"], (60, 60, 60))
+    
+    # ─── Row of 3 stories (2, 3, 4) ───
+    row1_y = lead_y + lead_h + 15
+    row_h = 132
+    col_w = (W - 60) // 3
+    
+    stories_row1 = [
+        ("UK ENERGY", GOLD, "Ofgem raises price cap 26% to £2,166; 20M hit as gas surges.", "lightning"),
+        ("GULF", RED, "Houthi drone strikes Riyadh PIF Tower, wounding 11 in second hit.", "drone"),
+        ("ENERGY", RED, "Tankers hit mines in Hormuz; 400 ships waiting, oil traffic down 40%.", "oil"),
     ]
-    tx = M + 104
-    for t in tick_items:
-        tw = d.textlength(t, font=f_sm)
-        if tx + tw + 30 > right:
-            break
-        d.text((tx, tk_top + 16), t, font=f_sm, fill=PAPER)
-        tx += tw + 24
-        d.line((tx - 12, tk_top + 18, tx - 12, tk_top + 38), fill=GREY, width=2)
-    ticker_bottom = tk_top + 54
-
-    # footer line
-    d.text((M, SIZE - 30), "All stories first reported 25 November 2026.",
-           font=f_sm, fill=GREY)
-    d.line([M, SIZE - 44, right, SIZE - 44], fill=GREY, width=1)
-
-    return img
-
-
-def draw_variant2():
-    img = Image.new("RGB", (SIZE, SIZE), PAPER)
-    d = ImageDraw.Draw(img)
-
-    f_ban = load_bold(34)
-    f_head = load_bold(22)
-    f_sum = load_reg(16)
-    f_chip = load_bold(14)
-
-    M = 28
-    right = SIZE - M
-    ban_h = 56
-    top_y = M + ban_h + 14
-
-    # date banner
-    d.rectangle([M - 10, M - 10, right + 10, M - 10 + ban_h], fill=INK)
-    d.text((M + 14, M + 4), "WEDNESDAY 25 NOVEMBER 2026", font=f_ban, fill=PAPER)
-    d.line([M - 10, M - 10 + ban_h, right + 10, M - 10 + ban_h], fill=RED, width=4)
-
-    # 2x3 grid: six equal panels
-    gap = 18
-    pad = 14
-    grid_top = top_y
-    grid_bottom = SIZE - M
-    cols, rows = 2, 3
-    cell_w = (SIZE - 2 * M - (cols - 1) * gap) // cols
-    cell_h = (grid_bottom - grid_top - (rows - 1) * gap) // rows
-
-    stories = [
-        ("GULF", RED,
-         "DRONE HITS RIYADH TALLEST TOWER",
-         "Houthi strike on PIF Tower wounds 11; the second hit in under a week; US urges vigilance.",
-         "tower"),
-        ("ENERGY", BLUE,
-         "TANKERS MINE-HIT IN HORMUZ",
-         "Strait near-paralysed, \u2248400 ships waiting, oil traffic -40%; rial at 2.83M a low.",
-         "gauge"),
-        ("POLITICS", (110, 40, 160),
-         "NATO EARLY-WARN AIRCRAFT TO POLAND",
-         "After missiles landed there during an attack on Ukraine; EU adds sanctions; Russia-Ukraine shipping feud.",
-         "plane"),
-        ("INDIA", (20, 140, 90),
-         "BJP + SAD ALLY FOR 2027 PUNJAB",
-         "Parties reunite after a six-year split; PM Shah wraps his first state visit to India.",
-         "broken"),
-        ("SPORT", (30, 120, 200),
-         "ENGLAND BEATS AUSTRALIA 8 WCKTS",
-         "Chase 185 to level the T20 series; India's women's hockey face China in Asia.",
-         "bats"),
-        ("CLIMATE", (200, 110, 20),
-         "COP31 FALLOUT: BOWEN RESIGN CALL",
-         "Opposition wants minister out; first no-deal since 2009; Tuvalu/Ireland 2027 exit summit.",
-         "bolt"),
+    
+    for i, (cat, chip_color, body, icon) in enumerate(stories_row1):
+        cx = 20 + i * (col_w + 10)
+        cy = row1_y
+        draw.rounded_rectangle([cx, cy, cx + col_w, cy + row_h], radius=6, fill=(255, 252, 245), outline=(200, 195, 185), width=1)
+        draw_chip(draw, (cx + 10, cy + 8), cat, FONTS["chip"], chip_color)
+        icon_zone_w = 65
+        text_w = col_w - icon_zone_w - 16
+        draw_story_icon(draw, cx + col_w - 35, cy + 45, 36, icon, chip_color)
+        hl = cat.split()[0] + " " + ("Price cap up 26%" if i == 0 else "PIF Tower hit again" if i == 1 else "Tankers mined in Hormuz")
+        lines = wrap_text(draw, hl, FONTS["story_headline"], text_w)
+        draw_wrapped(draw, (cx + 10, cy + 34), lines[:2], FONTS["story_headline"], INK)
+        lines = wrap_text(draw, body, FONTS["story_body"], text_w)
+        draw_wrapped(draw, (cx + 10, cy + 74), lines[:2], FONTS["story_body"], (50, 50, 50))
+    
+    # ─── Row of 4 briefs (5, 6, 7, 8) ───
+    row2_y = row1_y + row_h + 8
+    row2_h = 112
+    col4_w = (W - 70) // 4
+    
+    stories_row2 = [
+        ("TRADE", RED, "US proposes tariffs on 14 economies.", "tariff"),
+        (
+            "SPACE",
+            TEAL,
+            "Shenzhou-24 launches with new crew.",
+            "rocket",
+        ),
+        ("POLITICS", NAVY, "NATO deploys planes in Poland; EU acts.", "nato"),
+        ("MARKETS", RED, "AI doubts sink chip stocks.", "chip"),
     ]
-
-    for i, (tag, col, head, summ, icon) in enumerate(stories):
-        r, c = divmod(i, cols)
-        x0 = M + c * (cell_w + gap)
-        y0 = grid_top + r * (cell_h + gap)
-        x1 = x0 + cell_w
-        y1 = y0 + cell_h
-
-        # panel card
-        d.rounded_rectangle([x0, y0, x1, y1], radius=10, fill=WHITE, outline=col, width=3)
-        # top accent bar
-        d.rectangle([x0, y0, x1, y0 + 8], fill=col)
-
-        # header chip
-        chip(d, x0 + pad, y0 + 20, tag, f_chip, col, pad_x=10, pad_y=5)
-
-        # headline (up to 2 lines)
-        hy = y0 + 20 + 30
-        hh = hy
-        for ln in wrap_text(d, head, f_head, cell_w - 2 * pad):
-            if hh >= y1 - 96:
-                break
-            d.text((x0 + pad, hh), ln, font=f_head, fill=INK)
-            bb = f_head.getbbox(ln)
-            hh += (bb[3] - bb[1]) + 6
-            hy = hh
-        hy = hh + 4
-
-        # divider
-        d.line([x0 + pad, hy, x1 - pad, hy], fill=GREY, width=1)
-        hy += 10
-
-        # summary (one-line wrap, keep inside)
-        for ln in wrap_text(d, summ, f_sum, cell_w - 2 * pad - 54):
-            if hy >= y1 - pad - 4:
-                break
-            d.text((x0 + pad, hy), ln, font=f_sum, fill=INK)
-            bb = f_sum.getbbox(ln)
-            hy += (bb[3] - bb[1]) + 4
-
-        # icon bottom-right
-        icon_s = 30
-        ico_cx = x1 - pad - icon_s // 2
-        ico_cy = y1 - pad - icon_s // 2
-        draw_icon(d, ico_cx, ico_cy, icon, col, s=icon_s)
-
-    return img
-
-
-
-def draw_variant3():
-    img = Image.new("RGB", (SIZE, SIZE), PAPER)
-    draw = ImageDraw.Draw(img)
-
-    # fonts
-    f_date = load_bold(28)
-    f_headline = load_bold(52)
-    f_subhead = load_bold(26)
-    f_summary = load_reg(22)
-    f_chip = load_bold(18)
-    f_ticker = load_reg(20)
-
-    left = 60
-    right = SIZE - 60
-    content_w = right - left
-    y = 40
-
-    # DATE LINE
-    date_text = "WEDNESDAY 25 NOVEMBER 2026"
-    date_lines = wrap_text(draw, date_text, f_date, content_w)
-    y = draw_wrapped(draw, (left, y), date_lines, f_date, INK, leading=1.2)
-    y += 20
-
-    # STORY 1 HUGE HEADLINE
-    s1_headline = "Houthi drone strike hits Riyadh\'s tallest tower, PIF Tower, 11 wounded"
-    s1_lines = wrap_text(draw, s1_headline, f_headline, content_w)
-    y = draw_wrapped(draw, (left, y), s1_lines, f_headline, INK, leading=1.15)
-    y += 12
-
-    # RED RULE
-    rule_y = int(y)
-    draw.line((left, rule_y, right, rule_y), fill=RED, width=4)
-    y = rule_y + 20
-
-    # STORIES 2-6: FIVE HORIZONTAL BRIEF ROWS
-    stories = [
-        {
-            "chip": "ENERGY",
-            "color": BLUE,
-            "headline": "Iran says more oil tankers hit mines in Strait of Hormuz, ~400 ships waiting, traffic down 40%",
-            "summary": "Oil prices rebound from three-month lows; rial falls to record 2.83 million per US dollar after new US sanctions.",
-            "icon": "gauge",
-        },
-        {
-            "chip": "POLITICS",
-            "color": RED,
-            "headline": "NATO to deploy early-warning aircraft in Poland after missiles land during attack on Ukraine",
-            "summary": "At UN, Russia and Ukraine trade accusations over Black Sea shipping and energy attacks; EU announces further sanctions.",
-            "icon": "plane",
-        },
-        {
-            "chip": "INDIA",
-            "color": (180, 100, 30),
-            "headline": "BJP and Shiromani Akali Dal announce alliance for 2027 Punjab elections, reuniting after six-year split",
-            "summary": "Nepal PM Balendra Shah wraps first state visit to India after talks with PM Modi.",
-            "icon": "broken",
-        },
-        {
-            "chip": "SPORT",
-            "color": (30, 140, 80),
-            "headline": "England beat Australia by eight wickets in 2nd T20I, chase 185 to level five-match series",
-            "summary": "In India, women\'s hockey team faces China in Asian Champions Trophy.",
-            "icon": "bats",
-        },
-        {
-            "chip": "CLIMATE",
-            "color": (140, 60, 140),
-            "headline": "COP31 fallout: Australia opposition demands Climate Minister Bowen resign over Antalya collapse",
-            "summary": "First failure to reach deal since Copenhagen 2009; Thailand secures 800M baht climate support; Tuvalu to co-host fossil-fuel exit summit with Ireland in 2027.",
-            "icon": "bolt",
-        },
+    
+    for i, (cat, chip_color, body, icon) in enumerate(stories_row2):
+        cx = 20 + i * (col4_w + 10)
+        cy = row2_y
+        draw.rounded_rectangle([cx, cy, cx + col4_w, cy + row2_h], radius=6, fill=(255, 252, 245), outline=(200, 195, 185), width=1)
+        draw_chip(draw, (cx + 8, cy + 6), cat, FONTS["chip"], chip_color)
+        icon_zone_w = 60
+        text_w = col4_w - icon_zone_w - 14
+        draw_story_icon(draw, cx + col4_w - 30, cy + 40, 30, icon, chip_color)
+        hl = ("US tariffs on 14" if i == 0 else "Shenzhou-24 flight" if i == 1 else "NATO planes to Poland" if i == 2 else "AI doubts sink chips")
+        lines = wrap_text(draw, hl, FONTS["story_headline"], text_w)
+        draw_wrapped(draw, (cx + 8, cy + 30), lines[:2], FONTS["story_headline"], INK)
+        lines = wrap_text(draw, body, FONTS["story_body"], text_w)
+        draw_wrapped(draw, (cx + 8, cy + 64), lines[:2], FONTS["story_body"], (50, 50, 50))
+    
+    # ─── Row of 4 briefs (9, 10, 11, 12) ───
+    row3_y = row2_y + row2_h + 8
+    row3_h = 112
+    
+    stories_row3 = [
+        ("INDONESIA", TEAL, "Heavy rain floods gold mine; 9 dead.", "flood"),
+        ("INDIA", GOLD, "BJP and Akali Dal ally for polls.", "handshake"),
+        (
+            "CLIMATE",
+            NAVY,
+            "COP31 climate summit collapses.",
+            "cop",
+        ),
+        ("SPORT", TEAL, "England beat Australia in T20.", "sport"),
     ]
+    
+    for i, (cat, chip_color, body, icon) in enumerate(stories_row3):
+        cx = 20 + i * (col4_w + 10)
+        cy = row3_y
+        draw.rounded_rectangle([cx, cy, cx + col4_w, cy + row3_h], radius=6, fill=(255, 252, 245), outline=(200, 195, 185), width=1)
+        draw_chip(draw, (cx + 8, cy + 6), cat, FONTS["chip"], chip_color)
+        icon_zone_w = 60
+        text_w = col4_w - icon_zone_w - 14
+        draw_story_icon(draw, cx + col4_w - 30, cy + 40, 30, icon, chip_color)
+        hl = ("West Java flood: 9 dead" if i == 0 else "BJP-Akali Dal alliance" if i == 1 else "COP31 climate summit fails" if i == 2 else "England win T20 match")
+        lines = wrap_text(draw, hl, FONTS["story_headline"], text_w)
+        draw_wrapped(draw, (cx + 8, cy + 30), lines[:2], FONTS["story_headline"], INK)
+        lines = wrap_text(draw, body, FONTS["story_body"], text_w)
+        draw_wrapped(draw, (cx + 8, cy + 64), lines[:2], FONTS["story_body"], (50, 50, 50))
+    
+    # ─── Bottom ticker strip & footer moved up to avoid clipping ───
+    footer_y = H - 56
+    footer_text = "All stories first reported 25 November 2026"
+    fw = draw.textlength(footer_text, font=FONTS["footer"])
+    draw.text((int((W - fw) // 2), int(footer_y)), footer_text, font=FONTS["footer"], fill=(100, 100, 100))
+    
+    ticker_y = H - 40
+    draw.rectangle([0, ticker_y, W, H], fill=INK)
+    ticker_text = "THANKSGIVING: 81.5M US TRIPS  •  UKRAINE HIT RUSSIAN SHIP IN GULF OF FINLAND  •  SARKOZY CASE TO TRIAL  •  GAZA TOLL 74,746"
+    tw = draw.textlength(ticker_text, font=FONTS["ticker"])
+    tx = (W - tw) // 2
+    draw.text((int(tx), int(ticker_y + 8)), ticker_text, font=FONTS["ticker"], fill=WHITE)
 
-    row_h = 130
-    icon_size = 28
-    chip_top_offset = 8
-    for i, s in enumerate(stories):
-        row_y = int(y)
-        # chip
-        chip_x = left
-        chip_y = row_y + chip_top_offset
-        chip_right = chip(draw, chip_x, chip_y, s["chip"], f_chip, s["color"])
-        # icon
-        icon_cx = left + 30
-        icon_cy = row_y + row_h // 2
-        draw_icon(draw, icon_cx, icon_cy, s["icon"], s["color"], s=icon_size)
-        # headline
-        hl_x = chip_right + 20
-        hl_w = right - hl_x
-        hl_lines = wrap_text(draw, s["headline"], f_subhead, hl_w)
-        draw_wrapped(draw, (hl_x, row_y + 4), hl_lines, f_subhead, INK, leading=1.2)
-        # summary
-        sum_y = row_y + 50
-        sum_lines = wrap_text(draw, s["summary"], f_summary, hl_w)
-        draw_wrapped(draw, (hl_x, sum_y), sum_lines, f_summary, GREY, leading=1.25)
-        y = row_y + row_h + 6
-
-    # BOTTOM TICKER STRIP
-    ticker_y = SIZE - 70
-    draw.rectangle((0, ticker_y - 10, SIZE, SIZE), fill=INK)
-    ticker_items = [
-        "THANKSGIVING TRAVEL: AAA expects 81.5 million US travellers; FAA forecasts 417,000 flights over nine days",
-        "Zelenskiy confirms Ukraine struck a Russian ship in the Gulf of Finland",
-    ]
-    ticker_text = "  •  ".join(ticker_items)
-    ticker_lines = wrap_text(draw, ticker_text, f_ticker, SIZE - 120)
-    tx = 60
-    ty = ticker_y + 6
-    for line in ticker_lines:
-        draw.text((tx, ty), line, font=f_ticker, fill=WHITE)
-        bbox = f_ticker.getbbox(line)
-        h = bbox[3] - bbox[1] if bbox else int(f_ticker.size)
-        ty += h + 2
-
-    return img
-
-
-
+# ─── Main entry ───
 def main():
     variant = sys.argv[1] if len(sys.argv) > 1 else "1"
-    fn = globals().get("draw_variant" + variant)
-    if fn is None:
-        sys.stderr.write("unknown variant: %s\n" % variant)
+    draw_fn = globals().get("draw_variant" + variant)
+    if not draw_fn:
+        print(f"Unknown variant: {variant}", file=sys.stderr)
         sys.exit(1)
-    img = fn()
-    out = "variant_%s.png" % variant
-    img.save(out)
-    with open(out, "rb") as f:
-        n = len(f.read())
-    print("wrote %s %dx%d bytes %d" % (out, img.size[0], img.size[1], n))
+    img = Image.new("RGB", (W, H), BG)
+    draw = ImageDraw.Draw(img)
+    draw_fn(img, draw)
+    out_name = f"variant_r2_{variant}.png"
+    img.save(out_name, "PNG")
+    size = os.path.getsize(out_name)
+    print(f"wrote {out_name} 1024x1024 bytes {size}")
+
+def draw_variant2(img, draw):
+    """SIX PANELS WITH SCENES: date banner + 2x3 grid for stories 1-6."""
+    draw.rectangle([0, 0, W, H], fill=BG)
+    
+    # Date banner
+    banner_h = 56
+    draw.rectangle([0, 0, W, banner_h], fill=NAVY)
+    draw.text((40, 16), "WEDNESDAY 25 NOVEMBER 2026", font=FONTS["masthead"], fill=WHITE)
+    
+    # Grid layout
+    margin = 24
+    gap = 16
+    grid_x = margin
+    grid_y = banner_h + 20
+    grid_w = W - 2 * margin
+    panel_w = (grid_w - 2 * gap) // 3
+    panel_h = (H - grid_y - margin - gap) // 2
+    
+    stories = [
+        ("CAIRO", RED, "Fuel tanker overturns and burns on Ring Road — 31 dead, 21 hurt",
+         "Al-Warraq, Giza: tanker catches fire Wednesday evening; more than two dozen vehicles charred. Deadliest road blaze in years.",
+         "fire", draw_cairo_scene),
+        ("UK ENERGY", GOLD, "Ofgem raises price cap 26% to £2,166 from Jan; 20M households hit",
+         "Wholesale gas surges on Mideast conflict; highest cap in almost four years.",
+         "lightning", lambda d, x, y, w, h: draw_story_icon(d, x + w//2, y + h//2, min(w, h)//2, "lightning", GOLD)),
+        ("GULF", RED, "Houthi drone strikes Riyadh's PIF Tower again, wounding 11",
+         "Second hit in a week on King Abdullah Financial District tower; 2 Saudis, 2 Indians, 3 Nepalis, 4 Egyptians hurt.",
+         "drone", lambda d, x, y, w, h: draw_story_icon(d, x + w//2, y + h//2, min(w, h)//2, "drone", RED)),
+        ("ENERGY", RED, "Iran says more tankers hit mines in Strait of Hormuz; ~400 ships waiting",
+         "Oil traffic down 40%, rial hits record low 2.83M/$ after new US sanctions.",
+         "oil", lambda d, x, y, w, h: draw_story_icon(d, x + w//2, y + h//2, min(w, h)//2, "oil", RED)),
+        ("TRADE", RED, "US proposes tariffs on 14 economies: India 25%/17%, China up to 40%, Japan 15%",
+         "Aim: counter excess industrial capacity across steel, aluminium, EVs, solar.",
+         "tariff", lambda d, x, y, w, h: draw_story_icon(d, x + w//2, y + h//2, min(w, h)//2, "tariff", RED)),
+        ("SPACE", TEAL, "China launches Shenzhou-24 to Tiangong with Pakistani pilot Muhammad Zeeshan Ali",
+         "First foreign astronaut in China's manned space program.",
+         "rocket", lambda d, x, y, w, h: draw_story_icon(d, x + w//2, y + h//2, min(w, h)//2, "rocket", TEAL)),
+    ]
+    
+    for idx, (cat, chip_color, headline, summary, icon_name, scene_fn) in enumerate(stories):
+        row = idx // 3
+        col = idx % 3
+        px = grid_x + col * (panel_w + gap)
+        py = grid_y + row * (panel_h + gap)
+        
+        # Panel background
+        draw.rounded_rectangle([px, py, px + panel_w, py + panel_h], radius=8, fill=WHITE, outline=(200, 195, 185), width=1)
+        
+        # Header chip
+        chip_w, chip_h = draw_chip(draw, (px + 12, py + 10), cat, FONTS["chip"], chip_color)
+        
+        # Headline (up to 2 lines)
+        hl_x = px + 12
+        hl_y = py + chip_h + 20
+        hl_w = panel_w - 24
+        lines = wrap_text(draw, headline, FONTS["story_headline"], hl_w)
+        draw_wrapped(draw, (hl_x, hl_y), lines[:2], FONTS["story_headline"], INK)
+        
+        # Summary (1 line)
+        sum_y = hl_y + 48
+        sum_lines = wrap_text(draw, summary, FONTS["story_body"], hl_w)
+        draw_wrapped(draw, (hl_x, sum_y), sum_lines[:1], FONTS["story_body"], (60, 60, 60))
+        
+        # Large geometric scene in lower half
+        scene_y = py + panel_h // 2 + 10
+        scene_h = panel_h - (scene_y - py) - 15
+        scene_w = panel_w - 20
+        scene_x = px + 10
+        scene_fn(draw, scene_x, scene_y, scene_w, scene_h)
+    
+    # Footer
+    footer_y = H - 30
+    footer_text = "All stories first reported 25 November 2026"
+    fw = draw.textlength(footer_text, font=FONTS["footer"])
+    draw.text(((W - fw) // 2, footer_y), footer_text, font=FONTS["footer"], fill=(100, 100, 100))
 
 
+def draw_variant3(img, draw):
+    """LEAD + BRIEFS: huge story-1 headline, red rule, large scene, 8 brief rows, bottom strip."""
+    draw.rectangle([0, 0, W, H], fill=BG)
+    
+    # Date line
+    date_y = 18
+    draw.text((40, date_y), "WEDNESDAY 25 NOVEMBER 2026", font=FONTS["masthead"], fill=NAVY)
+    
+    # Huge headline for story 1
+    hl_y = date_y + 48
+    headline = "Fuel tanker overturns and burns on Cairo Ring Road — 31 dead, 21 hurt"
+    lines = wrap_text(draw, headline, FONTS["lead_headline"], W - 80)
+    draw_wrapped(draw, (40, hl_y), lines[:2], FONTS["lead_headline"], INK)
+    
+    # Red rule
+    rule_y = hl_y + 68
+    draw.rectangle([40, rule_y, W - 40, rule_y + 4], fill=RED)
+    
+    # Large Cairo scene
+    scene_y = rule_y + 20
+    scene_h = 340
+    draw_cairo_scene(draw, 40, scene_y, W - 80, scene_h)
+    
+    # Eight horizontal brief rows for stories 2-9
+    brief_y = scene_y + scene_h + 20
+    brief_h = 52
+    brief_gap = 8
+    
+    briefs = [
+        ("UK ENERGY", GOLD, "Ofgem raises price cap 26% to £2,166; 20M households hit as wholesale gas surges on Mideast conflict.", "lightning"),
+        ("GULF", RED, "Houthi drone strikes Riyadh's PIF Tower again, wounding 11 (2 Saudis, 2 Indians, 3 Nepalis, 4 Egyptians); second hit in a week.", "drone"),
+        ("ENERGY", RED, "Iran says more tankers hit mines in Strait of Hormuz; ~400 ships waiting, oil traffic down 40%, rial at 2.83M/$. ", "oil"),
+        ("TRADE", RED, "US proposes tariffs on 14 economies: India 25%/17%, China up to 40%, Japan 15% to counter excess capacity.", "tariff"),
+        ("SPACE", TEAL, "China launches Shenzhou-24 to Tiangong with Pakistani pilot Muhammad Zeeshan Ali — first foreign astronaut in program.", "rocket"),
+        ("POLITICS", NAVY, "NATO to deploy early-warning planes in Poland after missile strikes; UN: Russia/Ukraine trade accusations; EU adds sanctions.", "nato"),
+        ("MARKETS", RED, "AI doubts sink chips: Kospi -6.2%, Nasdaq near bear; S&P may cut Nvidia credit rating.", "chip"),
+        ("INDONESIA", TEAL, "Heavy rain floods illegal gold mine in West Java; 9 dead, 17 trapped.", "flood"),
+    ]
+    
+    for i, (cat, chip_color, body, icon) in enumerate(briefs):
+        by = brief_y + i * (brief_h + brief_gap)
+        # Row background
+        draw.rounded_rectangle([30, by, W - 30, by + brief_h], radius=6, fill=WHITE, outline=(220, 215, 205), width=1)
+        # Chip
+        draw_chip(draw, (40, by + 10), cat, FONTS["chip"], chip_color)
+        # Icon
+        draw_story_icon(draw, W - 60, by + brief_h // 2, 28, icon, chip_color)
+        # Headline + body combined as one-liner
+        text_x = 40 + 100
+        text_w = W - text_x - 80
+        lines = wrap_text(draw, body, FONTS["story_headline"], text_w)
+        draw_wrapped(draw, (text_x, by + 12), lines[:1], FONTS["story_headline"], INK)
+    
+    # Bottom strip: stories 10-12 + 2 ticker items
+    strip_y = brief_y + 8 * (brief_h + brief_gap) + 10
+    strip_h = H - strip_y - 10
+    
+    # Three story items side by side
+    item_w = (W - 80) // 3
+    bottom_stories = [
+        ("INDIA", GOLD, "BJP and Shiromani Akali Dal ally for 2027 Punjab polls after 6-year split; Nepal PM Balendra Shah visits Modi.", "handshake"),
+        ("CLIMATE", NAVY, "COP31 collapses in Antalya — first failure since Copenhagen 2009; Tuvalu/Ireland to host fossil-fuel exit summit 2027.", "cop"),
+        ("SPORT", TEAL, "England beat Australia by 8 wickets in 2nd T20, chase 185 to level series; India women face China in Asian Champions Trophy.", "sport"),
+    ]
+    
+    for i, (cat, chip_color, body, icon) in enumerate(bottom_stories):
+        ix = 40 + i * (item_w + 10)
+        draw.rounded_rectangle([ix, strip_y, ix + item_w, strip_y + strip_h], radius=6, fill=WHITE, outline=(200, 195, 185), width=1)
+        draw_chip(draw, (ix + 10, strip_y + 8), cat, FONTS["chip"], chip_color)
+        draw_story_icon(draw, ix + item_w // 2, strip_y + 40, 30, icon, chip_color)
+        lines = wrap_text(draw, body, FONTS["story_body"], item_w - 20)
+        draw_wrapped(draw, (ix + 10, strip_y + 65), lines[:3], FONTS["story_body"], (50, 50, 50))
+    
+    # Ticker strip at very bottom
+    ticker_y = H - 36
+    draw.rectangle([0, ticker_y, W, H], fill=INK)
+    ticker_text = "THANKSGIVING TRAVEL PEAKS: 81.5M US TRIPS  •  ZELENSKIY CONFIRMS UKRAINE STRUCK RUSSIAN SHIP IN GULF OF FINLAND  •  FRANCE ORDERS SARKOZY CORRUPTION CASE TO TRIAL  •  GAZA DEATH TOLL REACHES 74,746"
+    tw = draw.textlength(ticker_text, font=FONTS["ticker"])
+    tx = (W - tw) // 2
+    draw.text((int(tx), int(ticker_y + 8)), ticker_text, font=FONTS["ticker"], fill=WHITE)
+
+if __name__ == "__main__":
+    main()
 if __name__ == "__main__":
     main()
